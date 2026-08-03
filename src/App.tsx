@@ -71,7 +71,7 @@ function App() {
 
   return (
     <div className="app" style={{ ['--accent' as string]: accent }}>
-      <Background3D accent={resolveAccentHex(timer.state.type)} />
+      <Background3D />
       <div className="hero-glow" aria-hidden="true" />
       <EmberBurst burstKey={burst.key} color={burst.color} />
       <ClickWave />
