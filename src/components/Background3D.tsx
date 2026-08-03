@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface Shard {
   x: number
@@ -16,6 +16,40 @@ interface Shard {
   from: string
   to: string
   clip: string
+}
+
+interface FragmentSnapshot {
+  size: number
+  r: number
+  z: number
+  zAmp: number
+  ampX: number
+  ampY: number
+  ampRot: number
+  period: number
+  phase: number
+  opacity: number
+  from: string
+  to: string
+  clip: string
+  outline: { x: number; y: number }[]
+}
+
+interface Piece extends Shard {
+  id: number
+  child: boolean
+  px: number
+  py: number
+  vx: number
+  vy: number
+  lastKick: number
+  group?: number
+  origin?: { x: number; y: number }
+  parent?: FragmentSnapshot
+  outlineIndex?: number
+  entering?: boolean
+  dying?: boolean
+  diedAt?: number
 }
 
 const SHARDS: Shard[] = [
@@ -129,14 +163,24 @@ const SHARDS: Shard[] = [
   },
 ]
 
-interface Ripple {
-  x: number
-  y: number
-  radius: number
-  maxRadius: number
-  speed: number
-  strength: number
-}
+const REF_SIZE = 16
+const HOVER_ACC = 1.8
+const RESTITUTION = 0.9
+const COLLISION_E = 0.9
+const CORRECTION = 0.35
+const MAX_SPEED = 48
+const REPULSION = 340
+const REPULSION_FALLOFF = 0.14
+const FRAG_MIN_SIZE = 22
+const FRAG_COUNT = 5
+const MAX_PIECES = 130
+const DAMPING = 0.009
+const COALESCE_DELAY = 5000
+const MERGE_RADIUS = 18
+const FADE_OUT_MS = 650
+const HOME_SPEED = 3.4
+const HOME_GAIN = 0.06
+const HOME_EASE = 0.2
 
 function prefersReducedMotion(): boolean {
   return (
@@ -146,8 +190,68 @@ function prefersReducedMotion(): boolean {
   )
 }
 
+const mass = (size: number) => (size / REF_SIZE) ** 2
+
+function fragClip(): string {
+  const count = 3 + (Math.random() < 0.5 ? 1 : 0)
+  const pts: string[] = []
+  for (let i = 0; i < count; i += 1) {
+    pts.push(`${(6 + Math.random() * 88).toFixed(1)}% ${(6 + Math.random() * 88).toFixed(1)}%`)
+  }
+  return `polygon(${pts.join(', ')})`
+}
+
+function parseClip(clip: string): { x: number; y: number }[] {
+  const body = clip.replace('polygon(', '').replace(/\)$/, '')
+  return body.split(',').map((pair) => {
+    const [x, y] = pair.trim().split(/\s+/)
+    return { x: parseFloat(x), y: parseFloat(y) }
+  })
+}
+
+function outlinePoint(verts: { x: number; y: number }[], q: number): { x: number; y: number } {
+  const n = verts.length
+  if (n === 0) return { x: 50, y: 50 }
+  if (n === 1) return verts[0]
+  let perim = 0
+  for (let i = 0; i < n; i += 1) {
+    const a = verts[i]
+    const b = verts[(i + 1) % n]
+    perim += Math.hypot(b.x - a.x, b.y - a.y)
+  }
+  const target = Math.min(1, Math.max(0, q)) * perim
+  let acc = 0
+  for (let i = 0; i < n; i += 1) {
+    const a = verts[i]
+    const b = verts[(i + 1) % n]
+    const len = Math.hypot(b.x - a.x, b.y - a.y)
+    if (i === n - 1 || acc + len >= target) {
+      const t = len === 0 ? 0 : (target - acc) / len
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+    }
+    acc += len
+  }
+  return verts[0]
+}
+
+function toPieces(): Piece[] {
+  return SHARDS.map((shard, id) => ({
+    ...shard,
+    id,
+    child: false,
+    px: 0,
+    py: 0,
+    vx: 0,
+    vy: 0,
+    lastKick: 0,
+  }))
+}
+
 export function Background3D({ accent }: { accent: string }) {
-  const shardRefs = useRef<(HTMLSpanElement | null)[]>([])
+  const [pieces, setPieces] = useState<Piece[]>(toPieces)
+  const simRef = useRef<Piece[]>(pieces)
+  const elRefs = useRef(new Map<number, HTMLSpanElement>())
+  const nextId = useRef(SHARDS.length)
 
   useEffect(() => {
     if (import.meta.env.VITEST) return
@@ -163,47 +267,42 @@ export function Background3D({ accent }: { accent: string }) {
       vmin = Math.min(vw, vh) / 100
     }
 
-    const shardPhys = SHARDS.map(() => ({ x: 0, y: 0, vx: 0, vy: 0 }))
-    const centers = Array.from({ length: SHARDS.length }, () => ({ x: 0, y: 0, r: 0 }))
-    let ripples: Ripple[] = []
-    let pointer = { x: 0, y: 0, active: false }
+    const commit = (next: Piece[]) => {
+      simRef.current = next
+      setPieces(next)
+    }
+
+    const pointer = { x: 0, y: 0, active: false }
+    let lastClick = 0
     let last = performance.now()
     let raf = 0
-
-    // Newtonian physics constants
-    const REF_SIZE = 16
-    const mass = (size: number) => (size / REF_SIZE) ** 2
-    const HOVER_ACC = 1.8
-    const RESTITUTION = 0.9
-    const COLLISION_E = 0.9
-    const CORRECTION = 0.35
-    const MAX_SPEED = 40
 
     const compute = () => {
       const now = performance.now()
       const dt = Math.min((now - last) / 1000, 0.05)
       last = now
       const f = dt * 60
+      const list = simRef.current
+      const n = list.length
+      const centers = new Array<{ x: number; y: number; r: number }>(n)
+      const interacting = now - lastClick <= COALESCE_DELAY
 
-      for (const rp of ripples) rp.radius += rp.speed * f
-
-      for (let i = 0; i < SHARDS.length; i += 1) {
-        const el = shardRefs.current[i]
+      for (let i = 0; i < n; i += 1) {
+        const p = list[i]
+        const el = elRefs.current.get(p.id)
         if (!el) continue
-        const s = SHARDS[i]
-        const sizePx = s.size * vmin
-        const m = mass(s.size)
-        const baseX = (s.x / 100) * vw
-        const baseY = (s.y / 100) * vh
-        const t = ((now / 1000) / s.period) * Math.PI * 2 + s.phase
-        const fx = Math.sin(t) * s.ampX * vmin
-        const fy = Math.cos(t) * s.ampY * vmin
+        if (p.dying) continue
+        const sizePx = p.size * vmin
+        const m = mass(p.size)
+        const baseX = (p.x / 100) * vw
+        const baseY = (p.y / 100) * vh
+        const t = ((now / 1000) / p.period) * Math.PI * 2 + p.phase
+        const fx = Math.sin(t) * p.ampX * vmin
+        const fy = Math.cos(t) * p.ampY * vmin
+        const cx = baseX + fx + p.px + sizePx / 2
+        const cy = baseY + fy + p.py + sizePx / 2
 
-        const phys = shardPhys[i]
-        const cx = baseX + fx + phys.x + sizePx / 2
-        const cy = baseY + fy + phys.y + sizePx / 2
-
-        if (pointer.active) {
+        if (pointer.active && interacting) {
           const dx = cx - pointer.x
           const dy = cy - pointer.y
           const d2 = dx * dx + dy * dy
@@ -211,65 +310,54 @@ export function Background3D({ accent }: { accent: string }) {
           if (d2 < radius * radius && d2 > 0) {
             const dist = Math.sqrt(d2)
             const force = 1 - dist / radius
-            phys.vx += ((dx / dist) * HOVER_ACC * force) / m * f
-            phys.vy += ((dy / dist) * HOVER_ACC * force) / m * f
+            p.vx += ((dx / dist) * HOVER_ACC * force) / m * f
+            p.vy += ((dy / dist) * HOVER_ACC * force) / m * f
+            p.lastKick = now
           }
         }
 
-        for (const rp of ripples) {
-          const dx = cx - rp.x
-          const dy = cy - rp.y
-          const d2 = dx * dx + dy * dy
-          const band = 130
-          const minR = rp.radius
-          const maxR = minR + band
-          if (d2 >= minR * minR && d2 < maxR * maxR && d2 > 0) {
-            const dist = Math.sqrt(d2)
-            const falloff = 1 - (dist - minR) / band
-            phys.vx += ((dx / dist) * rp.strength * falloff) / m * f
-            phys.vy += ((dy / dist) * rp.strength * falloff) / m * f
-          }
-        }
+        p.px += p.vx * f
+        p.py += p.vy * f
 
-        phys.x += phys.vx * f
-        phys.y += phys.vy * f
+        const damp = Math.max(0, 1 - DAMPING * f)
+        p.vx *= damp
+        p.vy *= damp
 
-        const speed2 = phys.vx * phys.vx + phys.vy * phys.vy
+        const speed2 = p.vx * p.vx + p.vy * p.vy
         if (speed2 > MAX_SPEED * MAX_SPEED) {
           const speed = Math.sqrt(speed2)
-          phys.vx *= MAX_SPEED / speed
-          phys.vy *= MAX_SPEED / speed
+          p.vx *= MAX_SPEED / speed
+          p.vy *= MAX_SPEED / speed
         }
 
-        const minX = baseX + fx + phys.x
+        const minX = baseX + fx + p.px
         const maxX = minX + sizePx
-        const minY = baseY + fy + phys.y
+        const minY = baseY + fy + p.py
         const maxY = minY + sizePx
         if (minX < 0) {
-          phys.x = -baseX - fx
-          phys.vx = Math.abs(phys.vx) * RESTITUTION
+          p.px = -baseX - fx
+          p.vx = Math.abs(p.vx) * RESTITUTION
         } else if (maxX > vw) {
-          phys.x = vw - sizePx - baseX - fx
-          phys.vx = -Math.abs(phys.vx) * RESTITUTION
+          p.px = vw - sizePx - baseX - fx
+          p.vx = -Math.abs(p.vx) * RESTITUTION
         }
         if (minY < 0) {
-          phys.y = -baseY - fy
-          phys.vy = Math.abs(phys.vy) * RESTITUTION
+          p.py = -baseY - fy
+          p.vy = Math.abs(p.vy) * RESTITUTION
         } else if (maxY > vh) {
-          phys.y = vh - sizePx - baseY - fy
-          phys.vy = -Math.abs(phys.vy) * RESTITUTION
+          p.py = vh - sizePx - baseY - fy
+          p.vy = -Math.abs(p.vy) * RESTITUTION
         }
 
-        const c = centers[i]
-        c.x = baseX + fx + phys.x + sizePx / 2
-        c.y = baseY + fy + phys.y + sizePx / 2
-        c.r = sizePx * 0.5
+        centers[i] = { x: cx, y: cy, r: sizePx * 0.5 }
       }
 
-      for (let i = 0; i < SHARDS.length; i += 1) {
-        for (let j = i + 1; j < SHARDS.length; j += 1) {
-          const a = centers[i]
+      for (let i = 0; i < n; i += 1) {
+        const a = centers[i]
+        if (!a) continue
+        for (let j = i + 1; j < n; j += 1) {
           const b = centers[j]
+          if (!b) continue
           const dx = b.x - a.x
           const dy = b.y - a.y
           const minDist = a.r + b.r
@@ -279,15 +367,15 @@ export function Background3D({ accent }: { accent: string }) {
           const nx = dx / dist
           const ny = dy / dist
           const overlap = minDist - dist
-          const m1 = mass(SHARDS[i].size)
-          const m2 = mass(SHARDS[j].size)
+          const m1 = mass(list[i].size)
+          const m2 = mass(list[j].size)
           const inv = 1 / (m1 + m2)
-          const pa = shardPhys[i]
-          const pb = shardPhys[j]
-          pa.x -= nx * overlap * (m2 * inv) * CORRECTION
-          pa.y -= ny * overlap * (m2 * inv) * CORRECTION
-          pb.x += nx * overlap * (m1 * inv) * CORRECTION
-          pb.y += ny * overlap * (m1 * inv) * CORRECTION
+          const pa = list[i]
+          const pb = list[j]
+          pa.px -= nx * overlap * (m2 * inv) * CORRECTION
+          pa.py -= ny * overlap * (m2 * inv) * CORRECTION
+          pb.px += nx * overlap * (m1 * inv) * CORRECTION
+          pb.py += ny * overlap * (m1 * inv) * CORRECTION
           const rvx = pa.vx - pb.vx
           const rvy = pa.vy - pb.vy
           const relNormal = rvx * nx + rvy * ny
@@ -301,26 +389,241 @@ export function Background3D({ accent }: { accent: string }) {
             pa.vy *= 0.5
             pb.vx *= 0.5
             pb.vy *= 0.5
+            pa.lastKick = now
+            pb.lastKick = now
           }
         }
       }
 
-      for (let i = 0; i < SHARDS.length; i += 1) {
-        const el = shardRefs.current[i]
+      for (let i = 0; i < n; i += 1) {
+        const p = list[i]
+        const el = elRefs.current.get(p.id)
         if (!el) continue
-        const s = SHARDS[i]
-        const t = ((now / 1000) / s.period) * Math.PI * 2 + s.phase
-        const fx = Math.sin(t) * s.ampX * vmin
-        const fy = Math.cos(t) * s.ampY * vmin
-        const phys = shardPhys[i]
-        const rot = s.r + Math.sin(t * 0.7) * s.ampRot
-        const z = s.z + Math.sin(t * 0.6) * s.zAmp
-        el.style.transform = `translate3d(${fx + phys.x}px, ${fy + phys.y}px, ${z}px) rotateZ(${rot}deg)`
+        if (p.dying) continue
+        const t = ((now / 1000) / p.period) * Math.PI * 2 + p.phase
+        const fx = Math.sin(t) * p.ampX * vmin
+        const fy = Math.cos(t) * p.ampY * vmin
+        const rot = p.r + Math.sin(t * 0.7) * p.ampRot
+        const z = p.z + Math.sin(t * 0.6) * p.zAmp
+        el.style.transform = `translate3d(${fx + p.px}px, ${fy + p.py}px, ${z}px) rotateZ(${rot}deg)`
       }
 
-      ripples = ripples.filter((rp) => rp.radius < rp.maxRadius)
+      const idle = !interacting
+      const groups = new Map<number, Piece[]>()
+      for (const p of list) {
+        if (p.group === undefined || p.dying) continue
+        const members = groups.get(p.group) ?? []
+        members.push(p)
+        groups.set(p.group, members)
+      }
+
+      const mergeIds = new Set<number>()
+      const merged: Piece[] = []
+      const obstacles: { x: number; y: number; r: number; group: number }[] = []
+      if (idle) {
+        for (const g of groups.values()) {
+          if (g.length === 0) continue
+          const pd = g[0].parent!
+          const sizePx = pd.size * vmin
+          const boxLeft = (g[0].origin!.x / 100) * vw
+          const boxTop = (g[0].origin!.y / 100) * vh
+          obstacles.push({ x: boxLeft + sizePx / 2, y: boxTop + sizePx / 2, r: sizePx * 0.5, group: g[0].group! })
+          let allClose = true
+          for (const p of g) {
+            const fSizePx = p.size * vmin
+            const cx = (p.x / 100) * vw + p.px + fSizePx / 2
+            const cy = (p.y / 100) * vh + p.py + fSizePx / 2
+            const pt = outlinePoint(pd.outline, (p.outlineIndex! + 0.5) / FRAG_COUNT)
+            const txRaw = boxLeft + (pt.x / 100) * sizePx
+            const tyRaw = boxTop + (pt.y / 100) * sizePx
+            const margin = Math.max(fSizePx, MERGE_RADIUS * 2)
+            const tx = Math.min(vw - margin, Math.max(margin, txRaw))
+            const ty = Math.min(vh - margin, Math.max(margin, tyRaw))
+            const dx = tx - cx
+            const dy = ty - cy
+            const dist = Math.hypot(dx, dy)
+            if (dist > MERGE_RADIUS) allClose = false
+            if (dist > 0.001) {
+              const targetSpeed = Math.min(HOME_SPEED, dist * HOME_GAIN)
+              p.vx += ((dx / dist) * targetSpeed - p.vx) * HOME_EASE * f
+              p.vy += ((dy / dist) * targetSpeed - p.vy) * HOME_EASE * f
+            } else {
+              p.vx *= 0.9
+              p.vy *= 0.9
+            }
+          }
+          if (allClose) {
+            const first = g[0]
+            merged.push({
+              id: nextId.current++,
+              child: false,
+              entering: true,
+              x: first.origin!.x,
+              y: first.origin!.y,
+              size: pd.size,
+              ampX: pd.ampX,
+              ampY: pd.ampY,
+              z: pd.z,
+              zAmp: pd.zAmp,
+              r: pd.r,
+              ampRot: pd.ampRot,
+              period: pd.period,
+              phase: pd.phase,
+              opacity: pd.opacity,
+              from: pd.from,
+              to: pd.to,
+              clip: pd.clip,
+              px: 0,
+              py: 0,
+              vx: 0,
+              vy: 0,
+              lastKick: now,
+            })
+            for (const m of g) {
+              m.dying = true
+              m.diedAt = now
+              m.vx = 0
+              m.vy = 0
+            }
+          }
+        }
+      }
+
+      if (obstacles.length > 0) {
+        for (let i = 0; i < n; i += 1) {
+          const p = list[i]
+          if (p.dying) continue
+          const fSizePx = p.size * vmin
+          const cxp = (p.x / 100) * vw + p.px + fSizePx / 2
+          const cyp = (p.y / 100) * vh + p.py + fSizePx / 2
+          for (const ob of obstacles) {
+            if (p.group === ob.group) continue
+            const dx = cxp - ob.x
+            const dy = cyp - ob.y
+            const minDist = ob.r + fSizePx * 0.5
+            const d2 = dx * dx + dy * dy
+            if (d2 >= minDist * minDist || d2 === 0) continue
+            const dist = Math.sqrt(d2)
+            const nx = dx / dist
+            const ny = dy / dist
+            const overlap = minDist - dist
+            p.px += nx * overlap * CORRECTION
+            p.py += ny * overlap * CORRECTION
+            const rel = p.vx * nx + p.vy * ny
+            if (rel < 0) {
+              p.vx -= rel * nx
+              p.vy -= rel * ny
+            }
+          }
+        }
+      }
+
+      let expired = false
+      for (const p of list) {
+        if (p.dying && now - p.diedAt! >= FADE_OUT_MS) {
+          expired = true
+          break
+        }
+      }
+
+      if (merged.length > 0) {
+        commit(list.filter((p) => !mergeIds.has(p.id)).concat(merged))
+      } else if (expired) {
+        commit(list.filter((p) => !(p.dying && now - p.diedAt! >= FADE_OUT_MS)))
+      }
 
       raf = requestAnimationFrame(compute)
+    }
+
+    const explode = (x: number, y: number) => {
+      const now = performance.now()
+      const list = simRef.current
+      const r0 = vw * REPULSION_FALLOFF
+      const spawns: Piece[] = []
+      const removeIds = new Set<number>()
+
+      for (const p of list) {
+        const sizePx = p.size * vmin
+        const baseX = (p.x / 100) * vw
+        const baseY = (p.y / 100) * vh
+        const cx = baseX + p.px + sizePx / 2
+        const cy = baseY + p.py + sizePx / 2
+        let dx = cx - x
+        let dy = cy - y
+        let dist = Math.hypot(dx, dy)
+        if (dist < 0.001) {
+          dx = 1
+          dy = 0
+          dist = 1
+        }
+
+        const fall = 1 / (1 + dist / r0)
+        const kick = REPULSION * fall
+        const m = mass(p.size)
+
+        const canFrag = !p.child && p.size >= FRAG_MIN_SIZE && dist < sizePx
+        if (canFrag && list.length + spawns.length < MAX_PIECES) {
+          removeIds.add(p.id)
+          const boost = Math.max(34, kick * 0.24)
+          const origin = { x: p.x, y: p.y }
+          const outline = parseClip(p.clip)
+          const parent: FragmentSnapshot = {
+            size: p.size,
+            r: p.r,
+            z: p.z,
+            zAmp: p.zAmp,
+            ampX: p.ampX,
+            ampY: p.ampY,
+            ampRot: p.ampRot,
+            period: p.period,
+            phase: p.phase,
+            opacity: p.opacity,
+            from: p.from,
+            to: p.to,
+            clip: p.clip,
+            outline,
+          }
+          for (let k = 0; k < FRAG_COUNT; k += 1) {
+            const ang = (k / FRAG_COUNT) * Math.PI * 2 + Math.random() * 0.8
+            spawns.push({
+              id: nextId.current++,
+              child: true,
+              group: p.id,
+              origin,
+              parent,
+              outlineIndex: k,
+              x: (cx / vw) * 100,
+              y: (cy / vh) * 100,
+              size: p.size * (0.16 + Math.random() * 0.16),
+              ampX: (Math.random() * 2 - 1) * 3,
+              ampY: (Math.random() * 2 - 1) * 3,
+              z: p.z + (Math.random() * 50 - 25),
+              zAmp: Math.random() * 10,
+              r: p.r + (Math.random() * 60 - 30),
+              ampRot: p.ampRot * (0.5 + Math.random()),
+              period: p.period + Math.random() * 7,
+              phase: Math.random() * Math.PI * 2,
+              opacity: p.opacity * (0.75 + Math.random() * 0.25),
+              from: p.from,
+              to: p.to,
+              clip: fragClip(),
+              px: p.px,
+              py: p.py,
+              vx: p.vx + Math.cos(ang) * boost + (Math.random() * 2 - 1) * 8,
+              vy: p.vy + Math.sin(ang) * boost + (Math.random() * 2 - 1) * 8,
+              lastKick: now,
+            })
+          }
+          continue
+        }
+
+        p.vx += (dx / dist) * (kick / m)
+        p.vy += (dy / dist) * (kick / m)
+        p.lastKick = now
+      }
+
+      if (spawns.length === 0 && removeIds.size === 0) return
+      commit(list.filter((p) => !removeIds.has(p.id)).concat(spawns))
     }
 
     const onPointerMove = (event: PointerEvent) => {
@@ -332,17 +635,8 @@ export function Background3D({ accent }: { accent: string }) {
       pointer.active = false
     }
     const onPointerDown = (event: PointerEvent) => {
-      const x = event.clientX
-      const y = event.clientY
-      ripples.push({
-        x,
-        y,
-        radius: 24,
-        maxRadius: Math.max(vw, vh) * 0.75,
-        speed: 60,
-        strength: 12,
-      })
-      if (ripples.length > 8) ripples.shift()
+      lastClick = performance.now()
+      explode(event.clientX, event.clientY)
     }
 
     window.addEventListener('pointermove', onPointerMove)
@@ -362,21 +656,25 @@ export function Background3D({ accent }: { accent: string }) {
 
   return (
     <div className="bg3d" aria-hidden="true">
-      {SHARDS.map((shard, i) => (
+      {pieces.map((piece) => (
         <span
-          key={`shard-${i}`}
+          key={piece.id}
           ref={(el) => {
-            shardRefs.current[i] = el
+            if (el) elRefs.current.set(piece.id, el)
+            else elRefs.current.delete(piece.id)
           }}
-          className="bg3d__shard"
+          className={`bg3d__shard${piece.entering ? ' bg3d__shard--in' : ''}${
+            piece.dying ? ' bg3d__shard--out' : ''
+          }`}
           style={{
-            left: `${shard.x}%`,
-            top: `${shard.y}%`,
-            width: `${shard.size}vmin`,
-            height: `${shard.size}vmin`,
-            opacity: shard.opacity,
-            background: `linear-gradient(135deg, ${shard.from}, ${shard.to})`,
-            clipPath: shard.clip,
+            left: `${piece.x}%`,
+            top: `${piece.y}%`,
+            width: `${piece.size}vmin`,
+            height: `${piece.size}vmin`,
+            opacity: 'var(--piece-opacity)',
+            ['--piece-opacity' as string]: piece.opacity,
+            background: `linear-gradient(135deg, ${piece.from}, ${piece.to})`,
+            clipPath: piece.clip,
           }}
         />
       ))}

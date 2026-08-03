@@ -24,6 +24,32 @@
   transform: translate3d(0, 0, 0);
 }
 
+.bg3d__shard--in {
+  animation: bg3d-shard-in 480ms ease forwards;
+}
+
+.bg3d__shard--out {
+  animation: bg3d-shard-out 520ms ease forwards;
+}
+
+@keyframes bg3d-shard-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: var(--piece-opacity, 1);
+  }
+}
+
+@keyframes bg3d-shard-out {
+  from {
+    opacity: var(--piece-opacity, 1);
+  }
+  to {
+    opacity: 0;
+  }
+}
+
 .bg3d__fx {
   position: absolute;
   inset: 0;
