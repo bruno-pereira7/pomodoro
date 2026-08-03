@@ -129,17 +129,6 @@ const SHARDS: Shard[] = [
   },
 ]
 
-interface Particle {
-  x: number
-  y: number
-  vx: number
-  vy: number
-  size: number
-  alpha: number
-  decay: number
-  color: string
-}
-
 interface Ripple {
   x: number
   y: number
@@ -159,7 +148,6 @@ function prefersReducedMotion(): boolean {
 
 export function Background3D({ accent }: { accent: string }) {
   const shardRefs = useRef<(HTMLSpanElement | null)[]>([])
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {
     if (import.meta.env.VITEST) return
@@ -169,31 +157,15 @@ export function Background3D({ accent }: { accent: string }) {
     let vh = window.innerHeight
     let vmin = Math.min(vw, vh) / 100
 
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
-
-    const sizeCanvas = () => {
-      if (!canvas || !ctx) return
-      canvas.width = Math.round(vw * dpr)
-      canvas.height = Math.round(vh * dpr)
-      canvas.style.width = `${vw}px`
-      canvas.style.height = `${vh}px`
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    }
-    sizeCanvas()
-
     const remeasure = () => {
       vw = window.innerWidth
       vh = window.innerHeight
       vmin = Math.min(vw, vh) / 100
-      sizeCanvas()
     }
 
     const shardPhys = SHARDS.map(() => ({ x: 0, y: 0, vx: 0, vy: 0 }))
     const centers = Array.from({ length: SHARDS.length }, () => ({ x: 0, y: 0, r: 0 }))
     let ripples: Ripple[] = []
-    let particles: Particle[] = []
     let pointer = { x: 0, y: 0, active: false }
     let last = performance.now()
     let raf = 0
@@ -348,45 +320,7 @@ export function Background3D({ accent }: { accent: string }) {
 
       ripples = ripples.filter((rp) => rp.radius < rp.maxRadius)
 
-      if (ctx) {
-        ctx.clearRect(0, 0, vw, vh)
-        if (particles.length > 0) {
-          for (const p of particles) {
-            p.vy += 0.12 * f
-            p.x += p.vx * f
-            p.y += p.vy * f
-            p.alpha -= p.decay * f
-            if (p.alpha <= 0) continue
-            ctx.globalAlpha = Math.max(0, p.alpha)
-            ctx.beginPath()
-            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-            ctx.fillStyle = p.color
-            ctx.fill()
-          }
-          particles = particles.filter((p) => p.alpha > 0)
-        }
-      }
-
       raf = requestAnimationFrame(compute)
-    }
-
-    const spawnBurst = (x: number, y: number) => {
-      const palette = ['#ffffff', '#e6e6ea', '#c9c9d0', accent]
-      for (let i = 0; i < 26; i += 1) {
-        const angle = Math.random() * Math.PI * 2
-        const speed = 1.5 + Math.random() * 4.5
-        particles.push({
-          x,
-          y,
-          vx: Math.cos(angle) * speed,
-          vy: Math.sin(angle) * speed - 1.4,
-          size: 1.5 + Math.random() * 2.6,
-          alpha: 1,
-          decay: 0.018 + Math.random() * 0.02,
-          color: palette[Math.floor(Math.random() * palette.length)],
-        })
-      }
-      if (particles.length > 300) particles.splice(0, particles.length - 300)
     }
 
     const onPointerMove = (event: PointerEvent) => {
@@ -409,7 +343,6 @@ export function Background3D({ accent }: { accent: string }) {
         strength: 12,
       })
       if (ripples.length > 8) ripples.shift()
-      spawnBurst(x, y)
     }
 
     window.addEventListener('pointermove', onPointerMove)
@@ -447,7 +380,6 @@ export function Background3D({ accent }: { accent: string }) {
           }}
         />
       ))}
-      <canvas ref={canvasRef} className="bg3d__fx" />
     </div>
   )
 }

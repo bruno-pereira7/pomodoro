@@ -9,6 +9,7 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { HistoryPanel } from './components/HistoryPanel'
 import { EmberBurst } from './components/EmberBurst'
 import { Background3D } from './components/Background3D'
+import { ClickWave } from './components/ClickWave'
 import { Drawer } from './components/Drawer'
 import './App.css'
 
@@ -73,6 +74,7 @@ function App() {
       <Background3D accent={resolveAccentHex(timer.state.type)} />
       <div className="hero-glow" aria-hidden="true" />
       <EmberBurst burstKey={burst.key} color={burst.color} />
+      <ClickWave />
 
       <header className="app__top">
         <h1 className="app__title">Pomodoro</h1>

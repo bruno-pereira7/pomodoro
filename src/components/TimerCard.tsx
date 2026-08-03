@@ -45,7 +45,9 @@ export function TimerCard({
         <div className="timer__readout" key={state.type}>
           <span className="timer__type">{sessionLabel(state.type)}</span>
           <time className="timer__time">{formatTime(state.remainingSeconds)}</time>
-          <span className="timer__status">{STATUS_LABEL[state.status]}</span>
+          <span className="timer__status" role="status" aria-live="polite">
+            {STATUS_LABEL[state.status]}
+          </span>
         </div>
       </div>
       <div className="timer__controls">
