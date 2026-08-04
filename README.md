@@ -9,6 +9,14 @@ você trabalha.
 
 ---
 
+## ▶️ Veja em ação
+
+Um polígono se fragmenta com o clique e se reconstrói sozinho após alguns segundos:
+
+![Pomodoro — explosão e reconstrução](docs/screenshots/pomodoro-demo.gif)
+
+---
+
 ## 🖼️ O que você vê
 
 ![Pomodoro — desktop](docs/screenshots/review-pomodoro-desktop-1280.png)
